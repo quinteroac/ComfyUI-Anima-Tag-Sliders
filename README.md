@@ -4,6 +4,37 @@ Tag sliders for [Anima](https://huggingface.co/circlestone-labs/Anima) in ComfyU
 
 The tag goes into the prompt before Anima's LLM adapter, the same way it would if you wrote it at the end of the prompt. A strength of 1 looks like the tag as written.
 
+## Install
+
+You need a recent ComfyUI. Clone the repo into `ComfyUI/custom_nodes` and restart ComfyUI:
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/quinteroac/ComfyUI-Anima-Tag-Sliders
+```
+
+You can also use ComfyUI-Manager: **Install via Git URL** with the repo URL.
+
+The nodes need no extra Python packages. Only `benchmark/metrics.py` does (see Benchmark).
+
+To update later, run `git pull` in the pack folder and restart ComfyUI.
+
+## Setup
+
+Use the usual Anima files:
+
+- the Anima model in `models/diffusion_models`;
+- the Qwen3 0.6B text encoder in `models/text_encoders`;
+- the Qwen-Image VAE in `models/vae`.
+
+Wire the graph like this:
+
+1. **Load Diffusion Model** → **Anima Tag Sliders** (`model`) → KSampler.
+2. **Load CLIP** (type `stable_diffusion`) → **Anima Tag Sliders** (`clip`). Use the same CLIP that encodes your prompts.
+3. Leave the slider tags out of the prompt, because the node adds them. Set a strength on the node's sliders and queue.
+
+You can find both nodes under `Anima/conditioning`. Chain several nodes like LoRAs, each with its own mode.
+
 ## Nodes
 
 **Anima Tag Slider**: one bipolar slider. Negative strength uses `tag_low` and positive strength uses `tag_high`. In guidance mode with `tag_low` empty, negative strength pushes away from `tag_high`.
