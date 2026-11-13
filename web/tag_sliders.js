@@ -460,7 +460,10 @@ app.registerExtension({
             onWidgetChange(this, "steps", (before) => editor.rescaleSteps(before));
             onWidgetChange(this, "max_strength", () => editor.draw());
             onWidgetChange(this, "mode", () => editor.draw());
-            onWidgetChange(this, "axis", () => editor.draw());
+            onWidgetChange(this, "axis", () => {
+                this.properties.axis = this.widgets.find((w) => w.name === "axis").value;
+                editor.draw();
+            });
             editor.sync();
             if (this.size[0] < 380) this.setSize([380, this.size[1]]);
         };
@@ -468,6 +471,8 @@ app.registerExtension({
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             onConfigure?.apply(this, arguments);
+            // With guidance's rescale widget in front of it the frontend drops the saved axis value, so it is kept in properties too.
+            if (this.properties.axis) this.widgets.find((w) => w.name === "axis").value = this.properties.axis;
             this.widgets.find((w) => w.name === "steps").lastValue = this.widgets.find((w) => w.name === "steps").value;
             this.curveEditor.sync();
         };
