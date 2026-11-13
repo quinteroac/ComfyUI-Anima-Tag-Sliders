@@ -88,6 +88,24 @@ app.registerExtension({
 const MAX_CURVE_TAGS = 4;
 const CURVE_COLORS = ["#4fa3ff", "#ff8a3d", "#5fd068", "#e05fd0"];
 const PAD = { left: 34, right: 10, top: 26, bottom: 20 };
+// Curve shapes for the right-click menu: strength at t in [0, 1] of the steps, as a fraction of max_strength.
+// [before, after] is a jump at the first third of the steps.
+const SMOOTH = (t) => t * t * (3 - 2 * t);
+const BELL = (t) => Math.exp(-(((t - 0.5) / 0.18) ** 2) / 2);
+const CURVE_SHAPES = [
+    ["Flat (as written)", null],
+    ["Ramp up", (t) => t],
+    ["Ramp down", (t) => 1 - t],
+    ["Ease in", (t) => t * t],
+    ["Ease out", (t) => 1 - (1 - t) ** 2],
+    ["S-curve up", SMOOTH],
+    ["S-curve down", (t) => 1 - SMOOTH(t)],
+    ["Cosine fade", (t) => Math.cos((t * Math.PI) / 2)],
+    ["Bell (peak in the middle)", BELL],
+    ["Valley (dip in the middle)", (t) => 1 - BELL(t)],
+    ["Early only (first third)", [1, 0]],
+    ["Late only (last two thirds)", [0, 1]],
+];
 
 class CurveEditor {
     constructor(node) {
@@ -106,7 +124,7 @@ class CurveEditor {
         this.canvas.addEventListener("pointerup", (e) => this.onUp(e));
         this.canvas.addEventListener("pointerleave", () => { this.hover = null; this.draw(); });
         this.canvas.addEventListener("dblclick", (e) => this.onDouble(e));
-        this.canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); this.onDouble(e); });
+        this.canvas.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); this.openMenu(e); });
     }
 
     widget(name) { return this.node.widgets.find((w) => w.name === name); }
@@ -244,6 +262,61 @@ class CurveEditor {
         this.drag = null;
         this.canvas.releasePointerCapture(e.pointerId);
         this.draw();
+    }
+
+    // Points of a shape over the step axis: up to 11 evenly spaced for a smooth shape, the ends and both sides of the jump for a step.
+    shapePoints(shape) {
+        const last = this.steps - 1;
+        const y = (v) => Math.round(v * this.max * 100) / 100;
+        if (shape === null) return [[0, Math.min(1, this.max)], [last, Math.min(1, this.max)]];
+        if (Array.isArray(shape)) {
+            const jump = Math.min(Math.round(last / 3), last - 1);
+            if (jump < 0) return [[0, y(shape[1])]];
+            return [[0, y(shape[0])], [jump, y(shape[0])], [jump + 1, y(shape[1])], [last, y(shape[1])]].filter((p, i, a) => i === 0 || p[0] > a[i - 1][0]);
+        }
+        const n = Math.min(this.steps, 11);
+        const xs = [...new Set(Array.from({ length: n }, (_, i) => Math.round((i * last) / Math.max(n - 1, 1))))];
+        return xs.map((x) => [x, y(shape(last ? x / last : 0))]);
+    }
+
+    openMenu(e) {
+        const tag = this.tags[this.active];
+        if (tag === undefined) return;
+        const [px, py] = this.pos(e);
+        const point = this.nearest(px, py, this.area());
+        document.querySelector(".curve-shape-menu")?.remove();
+        const menu = document.createElement("div");
+        menu.className = "curve-shape-menu";
+        menu.style.cssText = `position:fixed;left:${e.clientX}px;top:${e.clientY}px;z-index:10000;background:#222;border:1px solid #555;border-radius:4px;padding:4px 0;font:12px sans-serif;color:#ddd;min-width:190px;box-shadow:0 4px 12px #0008;`;
+        const item = (label, action, color) => {
+            const row = document.createElement("div");
+            row.textContent = label;
+            row.style.cssText = `padding:4px 12px;cursor:${action ? "pointer" : "default"};color:${color ?? (action ? "#ddd" : "#888")};white-space:nowrap;`;
+            if (action) {
+                row.onmouseenter = () => { row.style.background = "#3a3a3a"; };
+                row.onmouseleave = () => { row.style.background = ""; };
+                row.onpointerdown = (ev) => { ev.stopPropagation(); close(); action(); };
+            }
+            menu.appendChild(row);
+        };
+        const outside = (ev) => { if (!menu.contains(ev.target)) close(); };
+        const close = () => { menu.remove(); document.removeEventListener("pointerdown", outside, true); };
+        item(`Curve shape for "${tag}"`, null, CURVE_COLORS[this.active]);
+        for (const [label, shape] of CURVE_SHAPES) {
+            item(label, () => {
+                const curves = this.load();
+                curves[tag] = this.shapePoints(shape);
+                this.save(curves);
+                this.draw();
+            });
+        }
+        if (point >= 0 && this.load()[tag].length > 1) item("Delete point", () => this.onDouble(e), "#e88");
+        document.body.appendChild(menu);
+        // Keep the menu on screen.
+        const r = menu.getBoundingClientRect();
+        if (r.bottom > window.innerHeight) menu.style.top = `${Math.max(0, window.innerHeight - r.height)}px`;
+        if (r.right > window.innerWidth) menu.style.left = `${Math.max(0, window.innerWidth - r.width)}px`;
+        setTimeout(() => document.addEventListener("pointerdown", outside, true));
     }
 
     onDouble(e) {

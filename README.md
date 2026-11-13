@@ -50,7 +50,8 @@ You can find the nodes under `Anima/conditioning`. Chain several nodes like LoRA
 **Anima Tag Curves**: up to 4 tags, one per line, each with its own strength curve over the sampling steps. The editor in the node draws one curve per tag: x is the step (0 to `steps` − 1), y the strength (0 to `max_strength`, and down to −`max_strength` in guidance). The dashed line at 1 is the tag as written.
 
 - Click a tag in the legend to edit its curve. The others stay visible, faded.
-- Click to add a point, drag to move it, double-click or right-click to delete it.
+- Click to add a point, drag to move it, double-click to delete it.
+- Right-click the curve area for a menu of shapes for the selected tag's curve: flat at 1, ramp up or down, ease in or out, S-curve up or down, cosine fade, bell, valley, early only (first third) or late only (last two thirds). The shape spans 0 to `max_strength` over the steps, and you can edit its points afterwards. On a point, the menu also has Delete point.
 - Between points the strength is linear, past the first and last point it stays flat. A new tag starts flat at 1.
 - Changing `steps` keeps the points at the same place on the curve. A sampler with a different step count is stretched onto the curve.
 - Modes are the same as the sliders. Guidance only has `rescale`, since the curve replaces `start_percent`, `end_percent` and `anchor`; a curve at 0 early on is the anchor.
