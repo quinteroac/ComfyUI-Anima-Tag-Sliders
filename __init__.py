@@ -1,5 +1,6 @@
 import json
 import math
+import sys
 
 import torch
 
@@ -13,11 +14,16 @@ WEB_DIRECTORY = "./web"
 
 BIAS_KEY = "anima_tag_bias"
 SCALE_KEY = "anima_tag_scale"
+CURVE_KEY = "anima_tag_curve"
+ARRAY_KEYS = (BIAS_KEY, SCALE_KEY, CURVE_KEY)
 BASE_KEY = "anima_tag_base"
+CURVES_OPTION = "anima_tag_curves"
+MAX_CURVE_TAGS = 4
 MODE_TOOLTIP = "weight scales the tag's contribution, weight_norm does the same but keeps each cross-attention output at the magnitude of the tag as written, attention biases how much the image attends to it, guidance pushes along the difference between the prompt with and without the tag."
 
 
-def extra_conds_with_tag(original, cond, ids, weights, attn_bias, value_scale, base_key):
+def extra_conds_with_tag(original, cond, ids, weights, marks, base_key):
+    """marks: (array key, neutral value, apply) for each per-token array that carries the tag."""
     def extra_conds(**kwargs):
         base = original(**kwargs) if base_key is not None else None
         start = None
@@ -31,10 +37,9 @@ def extra_conds_with_tag(original, cond, ids, weights, attn_bias, value_scale, b
         out = original(**kwargs) if start is not None or base is None else base
         if base_key is not None and "c_crossattn" in out:
             keep_base(out, base, base_key)
-        if attn_bias is not None and "c_crossattn" in out:
-            mark_tag(out, BIAS_KEY, 0.0, start, len(ids), lambda a: a.add_(attn_bias))
-        if value_scale is not None and "c_crossattn" in out:
-            mark_tag(out, SCALE_KEY, 1.0, start, len(ids), lambda a: a.mul_(value_scale))
+        if "c_crossattn" in out:
+            for key, neutral, apply in marks:
+                mark_tag(out, key, neutral, start, len(ids), apply)
         return out
     return extra_conds
 
@@ -43,7 +48,7 @@ def keep_base(out, base, key):
     """Context without the tag, for the pass that leaves it out. Every prompt carries one so they still batch.
     Tags of earlier nodes sit at other positions once this tag is gone, so that pass keeps its own arrays."""
     out[key] = base["c_crossattn"]
-    for array_key in (BIAS_KEY, SCALE_KEY):
+    for array_key in ARRAY_KEYS:
         if array_key in base:
             out[key + array_key] = base[array_key]
 
@@ -52,7 +57,7 @@ def mark_tag(out, key, neutral, start, length, apply):
     """Writes the tag into a per-token array. Every prompt carries the array so positive and negative still batch together.
     A later node's tag comes before any guidance tag in the prompt, so it has the same positions in each pass without a guidance tag."""
     context = out["c_crossattn"].cond
-    keys = [key] + [k + key for k in out if k.startswith(BASE_KEY) and not k.endswith((BIAS_KEY, SCALE_KEY))]
+    keys = [key] + [k + key for k in out if k.startswith(BASE_KEY) and not k.endswith(ARRAY_KEYS)]
     for k in keys:
         array = out[k].cond if k in out else torch.full(context.shape[:2], neutral, device=context.device, dtype=context.dtype)
         if start is not None:
@@ -106,23 +111,39 @@ def pop_base_wrapper(executor, *args, **kwargs):
 
 def without_tag(model_conds, base_key):
     out = {**model_conds, "c_crossattn": model_conds[base_key]}
-    for key in (BIAS_KEY, SCALE_KEY):
+    for key in ARRAY_KEYS:
         if key in model_conds:
             out[key] = model_conds[base_key + key]
     return out
 
 
-def tag_guidance(previous, tags, sigma_start, sigma_end, rescale, anchor):
+def range_schedule(tags, sigma_start, sigma_end, anchor):
+    """The strength inside the range; anchor: before the range the tag is off instead of as written."""
+    def schedule(sigma, sample_sigmas):
+        if sigma_end <= sigma <= sigma_start:
+            return tags
+        if anchor and sigma > sigma_start:
+            return [(key, 0.0) for key, _ in tags]
+        return []
+    return schedule
+
+
+def curve_schedule(tags, steps):
+    def schedule(sigma, sample_sigmas):
+        x = curve_step(sigma, sample_sigmas, steps)
+        return [(key, curve_value(points, x)) for key, points in tags]
+    return schedule
+
+
+def tag_guidance(previous, schedule, rescale):
     """pred = with + sum((s - 1) * (with - without_tag)): s=0 drops the tag, s=1 is the tag as written.
-    anchor: before the range the tag is off instead of as written."""
+    schedule(sigma, sample_sigmas) gives the (tag, s) pairs of the current step."""
     def calc_cond_batch(args):
         conds, sigma = args["conds"], args["sigma"]
-        current = sigma.max().item()
         active = []
-        if conds[0] is not None and sigma_end <= current <= sigma_start:
-            active = [(key, s) for key, s in tags if s != 1.0]
-        elif conds[0] is not None and anchor and current > sigma_start:
-            active = [(key, 0.0) for key, _ in tags]
+        if conds[0] is not None:
+            sample_sigmas = args["model_options"]["transformer_options"].get("sample_sigmas")
+            active = [(key, s) for key, s in schedule(sigma.max().item(), sample_sigmas) if s != 1.0]
         extra = [[{**c, "model_conds": without_tag(c["model_conds"], key)} for c in conds[0]] for key, _ in active]
         args = {**args, "conds": conds + extra}
         if previous is not None:
@@ -166,29 +187,94 @@ def apply_tags(model, clip, weighted, mode_values):
         sampling = patched.get_model_object("model_sampling")
         patched.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, BASE_KEY, pop_base_wrapper)
         previous = patched.model_options.get("sampler_calc_cond_batch_function")
-        patched.model_options["sampler_calc_cond_batch_function"] = tag_guidance(previous, guided, sampling.percent_to_sigma(mode_values["start_percent"]), sampling.percent_to_sigma(mode_values["end_percent"]),
-                                                                                 mode_values["rescale"], mode_values["anchor"])
+        schedule = range_schedule(guided, sampling.percent_to_sigma(mode_values["start_percent"]), sampling.percent_to_sigma(mode_values["end_percent"]), mode_values["anchor"])
+        patched.model_options["sampler_calc_cond_batch_function"] = tag_guidance(previous, schedule, mode_values["rescale"])
     return patched
 
 
-def add_tag(patched, clip, tag, strength, mode):
+def encode_tag(clip, tag):
     cond, extra = clip.encode_from_tokens_scheduled(clip.tokenize(tag), show_pbar=False)[0]
     # Drop T5 </s>, the prompt already has its own.
-    ids, weights = extra["t5xxl_ids"][:-1], extra["t5xxl_weights"][:-1]
-    attn_bias = value_scale = base_key = None
+    return cond, extra["t5xxl_ids"][:-1], extra["t5xxl_weights"][:-1]
+
+
+def add_tag(patched, clip, tag, strength, mode):
+    cond, ids, weights = encode_tag(clip, tag)
+    marks = []
+    base_key = None
     if mode == "attention":
         # log(w) on the logits multiplies the tag's attention by w before softmax renormalizes.
         patched.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, BIAS_KEY, cross_attention_wrapper)
-        attn_bias = math.log(strength)
+        bias = math.log(strength)
+        marks.append((BIAS_KEY, 0.0, lambda a: a.add_(bias)))
     elif mode == "guidance":
         base_key = f"{BASE_KEY}_{tag}"
     else:
         weights = weights * strength
         if mode == "weight_norm":
             patched.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, BIAS_KEY, cross_attention_wrapper)
-            value_scale = strength
-    patched.add_object_patch("extra_conds", extra_conds_with_tag(patched.get_model_object("extra_conds"), cond, ids, weights, attn_bias, value_scale, base_key))
+            marks.append((SCALE_KEY, 1.0, lambda a: a.mul_(strength)))
+    patched.add_object_patch("extra_conds", extra_conds_with_tag(patched.get_model_object("extra_conds"), cond, ids, weights, marks, base_key))
     return base_key
+
+
+def curve_value(points, x):
+    """Piecewise linear through the points, flat past the ends."""
+    if x <= points[0][0]:
+        return points[0][1]
+    for (x0, y0), (x1, y1) in zip(points, points[1:]):
+        if x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0) if x1 > x0 else y1
+    return points[-1][1]
+
+
+def curve_step(sigma, sample_sigmas, steps):
+    """Where the current step falls on a curve axis of `steps` steps; a sampler with another step count is stretched onto it."""
+    sample = sample_sigmas[:-1].tolist()
+    i = min(range(len(sample)), key=lambda j: abs(sample[j] - sigma))
+    return i * (steps - 1) / max(len(sample) - 1, 1)
+
+
+def curve_attention(previous, weight, norm, bias):
+    """Per-token value scales and logit bias of the curve tags at this step. norm scales the values like weight,
+    then keeps each cross-attention output at the magnitude it has with those tags as written."""
+    def override(func, q, k, v, *args, **kwargs):
+        def attention(v):
+            if previous is not None:
+                return previous(func, q, k, v, *args, **kwargs)
+            return func(q, k, v, *args, **kwargs)
+        if k.shape[2] != weight.shape[-1]:
+            return attention(v)
+        if bias is not None:
+            kwargs["mask"] = bias[:, None, None, :].to(q)
+        v = v * weight[:, None, :, None].to(v)
+        if norm is None:
+            return attention(v)
+        out = attention(v * norm[:, None, :, None].to(v))
+        reference = attention(v)
+        return out * (reference.norm(dim=-1, keepdim=True) / out.norm(dim=-1, keepdim=True).clamp(min=1e-6))
+    return override
+
+
+def curve_attention_wrapper(executor, *args, **kwargs):
+    numbers = kwargs.pop(CURVE_KEY, None)
+    if numbers is not None:
+        options = kwargs["transformer_options"].copy()
+        curves = options[CURVES_OPTION]
+        sigma = options["sigmas"].max().item()
+        # Row 0 is every token that is not a curve tag.
+        tables = {mode: [1.0] for mode in ("weight", "weight_norm", "attention")}
+        for points, steps, mode in curves:
+            s = max(curve_value(points, curve_step(sigma, options["sample_sigmas"], steps)), 0.0)
+            for m, table in tables.items():
+                table.append(s if m == mode else 1.0)
+        index = numbers.long()
+        weight, norm, attn = (torch.tensor(tables[m], device=numbers.device, dtype=numbers.dtype)[index] for m in ("weight", "weight_norm", "attention"))
+        modes = {mode for _, _, mode in curves}
+        options["optimized_attention_override"] = curve_attention(options.get("optimized_attention_override"), weight, norm if "weight_norm" in modes else None,
+                                                                  attn.log() if "attention" in modes else None)
+        kwargs["transformer_options"] = options
+    return executor(*args, **kwargs)
 
 
 def parse_tag(text, default_max):
@@ -294,9 +380,80 @@ class AnimaTagSliders(io.ComfyNode):
         return io.NodeOutput(apply_tags(model, clip, weighted, mode))
 
 
+def parse_curves(tags, curves, steps, max_strength, mode):
+    """One curve per tag line: points (step, strength) sorted by step and kept inside the axes. A tag with no curve stays as written."""
+    tags = [t.strip() for t in tags.splitlines() if t.strip() and not t.strip().startswith("#")]
+    if len(tags) > MAX_CURVE_TAGS:
+        raise ValueError(f"Anima Tag Curves takes up to {MAX_CURVE_TAGS} tags, one per line; got {len(tags)}.")
+    low = -max_strength if mode == "guidance" else 0.0
+    out = []
+    for tag in dict.fromkeys(tags):
+        points = sorted((min(max(float(x), 0.0), steps - 1.0), min(max(float(y), low), max_strength)) for x, y in curves.get(tag) or [[0, 1.0]])
+        out.append((tag, points))
+    return out
+
+
+class AnimaTagCurves(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="AnimaTagCurves",
+            display_name="Anima Tag Curves",
+            category="Anima/conditioning",
+            description="Up to 4 tags, one per line, each with its own strength curve over the sampling steps. Draw the curves in the editor: x is the step, y the strength (1 = the tag as written).",
+            inputs=[
+                io.Model.Input("model"),
+                io.Clip.Input("clip"),
+                io.String.Input("tags", multiline=True, default="from above\nfisheye"),
+                io.Int.Input("steps", default=20, min=1, max=10000, tooltip="Steps on the curve axis. A sampler with another step count is stretched onto the curve."),
+                io.Float.Input("max_strength", default=1.5, min=0.05, max=sys.float_info.max, step=0.05, tooltip="Top of the strength axis; in guidance the axis also goes down to -max_strength."),
+                io.String.Input("curves", default="{}"),
+                io.DynamicCombo.Input("mode", tooltip=MODE_TOOLTIP, options=[
+                    io.DynamicCombo.Option("weight", []),
+                    io.DynamicCombo.Option("weight_norm", []),
+                    io.DynamicCombo.Option("attention", []),
+                    io.DynamicCombo.Option("guidance", [
+                        io.Float.Input("rescale", default=0.0, min=0.0, max=1.0, step=0.01, tooltip="Pulls the pushed prediction back to the contrast of the prompt as written, like RescaleCFG."),
+                    ]),
+                ]),
+                io.Boolean.Input("bypass", default=False, tooltip="Returns the model unchanged, to compare against the image without the tags."),
+            ],
+            outputs=[io.Model.Output()],
+        )
+
+    @classmethod
+    def execute(cls, model, clip, tags, steps, max_strength, curves, mode, bypass):
+        curves = parse_curves(tags, json.loads(curves or "{}"), steps, max_strength, mode["mode"])
+        if bypass or not curves:
+            return io.NodeOutput(model)
+        patched = model.clone()
+        if mode["mode"] == "guidance":
+            guided = []
+            for tag, points in curves:
+                cond, ids, weights = encode_tag(clip, tag)
+                key = f"{BASE_KEY}_{tag}"
+                patched.add_object_patch("extra_conds", extra_conds_with_tag(patched.get_model_object("extra_conds"), cond, ids, weights, [], key))
+                guided.append((key, points))
+            patched.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, BASE_KEY, pop_base_wrapper)
+            previous = patched.model_options.get("sampler_calc_cond_batch_function")
+            patched.model_options["sampler_calc_cond_batch_function"] = tag_guidance(previous, curve_schedule(guided, steps), mode["rescale"])
+            return io.NodeOutput(patched)
+        # The tags go in as written; each step scales them in cross-attention, where weight and weight_norm act on the values only.
+        options = patched.model_options.setdefault("transformer_options", {})
+        registered = list(options.get(CURVES_OPTION, []))
+        for tag, points in curves:
+            cond, ids, weights = encode_tag(clip, tag)
+            registered.append((points, steps, mode["mode"]))
+            number = float(len(registered))
+            patched.add_object_patch("extra_conds", extra_conds_with_tag(patched.get_model_object("extra_conds"), cond, ids, weights, [(CURVE_KEY, 0.0, lambda a, n=number: a.fill_(n))], None))
+        options[CURVES_OPTION] = registered
+        patched.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, CURVE_KEY, curve_attention_wrapper)
+        return io.NodeOutput(patched)
+
+
 class AnimaTagSlidersExtension(ComfyExtension):
     async def get_node_list(self):
-        return [AnimaTagSlider, AnimaTagSliders]
+        return [AnimaTagSlider, AnimaTagSliders, AnimaTagCurves]
 
 
 async def comfy_entrypoint():

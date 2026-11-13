@@ -33,7 +33,7 @@ Wire the graph like this:
 2. **Load CLIP** (type `stable_diffusion`) → **Anima Tag Sliders** (`clip`). Use the same CLIP that encodes your prompts.
 3. Leave the slider tags out of the prompt, because the node adds them. Set a strength on the node's sliders and queue.
 
-You can find both nodes under `Anima/conditioning`. Chain several nodes like LoRAs, each with its own mode.
+You can find the nodes under `Anima/conditioning`. Chain several nodes like LoRAs, each with its own mode.
 
 ## Nodes
 
@@ -47,7 +47,18 @@ You can find both nodes under `Anima/conditioning`. Chain several nodes like LoR
 - `fisheye#4`: sets that tag's maximum strength.
 - Lines starting with `#` are skipped.
 
-Both nodes have a `bypass` switch that returns the model unchanged, so you can compare against the image without the tags.
+**Anima Tag Curves**: up to 4 tags, one per line, each with its own strength curve over the sampling steps. The editor in the node draws one curve per tag: x is the step (0 to `steps` − 1), y the strength (0 to `max_strength`, and down to −`max_strength` in guidance). The dashed line at 1 is the tag as written.
+
+- Click a tag in the legend to edit its curve. The others stay visible, faded.
+- Click to add a point, drag to move it, double-click or right-click to delete it.
+- Between points the strength is linear, past the first and last point it stays flat. A new tag starts flat at 1.
+- Changing `steps` keeps the points at the same place on the curve. A sampler with a different step count is stretched onto the curve.
+- Modes are the same as the sliders. Guidance only has `rescale`, since the curve replaces `start_percent`, `end_percent` and `anchor`; a curve at 0 early on is the anchor.
+- The tags go in as written; each step scales them in cross-attention. weight and weight_norm scale only the values there, which in Anima matches scaling the token weights. At strength 0 the tag's values are zero, like padding, not removed.
+
+`example_workflows/anima_tag_curves.json` is a text-to-image workflow on anima-base with `fisheye` at 3 for the first 10 steps, fading to 1 by step 20.
+
+All nodes have a `bypass` switch that returns the model unchanged, so you can compare against the image without the tags.
 
 ## Modes
 
@@ -76,6 +87,16 @@ These come from the benchmark in `benchmark/` (43 tags, anima-base, 4 seeds on t
 - Keeping the rest of the image: turn on `anchor`. This works for small additions such as a cat, a phone or a hat, but not for a whole outfit.
 - Pushing away from a tag: guidance with a negative strength. For example, `big eyes` −4 from 0.35 narrows the eyes. A trait the prompt itself asks for is harder to remove: `smile` −8 removed it on only 2 of 4 seeds.
 - Guidance strengthens everything the tag correlates with in the training data, not just the tag. If a tag turns the image gray, add `monochrome, greyscale` to the negative prompt.
+
+## Tests
+
+From the ComfyUI root:
+
+```bash
+python custom_nodes/ComfyUI-Anima-Tag-Sliders/tests/test_curves.py
+```
+
+It samples a tiny random Anima on CPU and checks that a flat curve equals the slider node at the same strength in every mode, and that each step uses its own value of the curve.
 
 ## Benchmark
 
