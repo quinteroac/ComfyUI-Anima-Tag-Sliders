@@ -130,6 +130,9 @@ class CurveEditor {
     widget(name) { return this.node.widgets.find((w) => w.name === name); }
     get steps() { return Math.max(1, this.widget("steps").value); }
     get max() { return this.widget("max_strength").value; }
+    // The noise axis runs from full noise (x = 0) to none (x = steps - 1); both models are flow models, so full noise is 1.
+    get noise() { return this.widget("axis")?.value === "noise"; }
+    xLabel(x) { return this.noise ? (1 - x / Math.max(this.steps - 1, 1)).toFixed(2) : `${x}`; }
     get low() { return this.widget("mode").value === "guidance" ? -this.max : 0; }
     get tags() {
         const lines = this.widget("tags").value.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
@@ -367,11 +370,11 @@ class CurveEditor {
         ctx.textBaseline = "top";
         const last = Math.max(this.steps - 1, 1);
         const every = Math.max(1, Math.ceil(this.steps / 10));
-        for (let x = 0; x <= last; x += every) {
-            const [sx] = this.toScreen([x, 0], a);
-            ctx.fillStyle = "#888";
-            ctx.fillText(x, sx, a.y1 + 4);
-        }
+        const ticks = [];
+        if (this.noise) for (let i = 0; i <= 4; i++) ticks.push((i * last) / 4);
+        else for (let x = 0; x <= last; x += every) ticks.push(x);
+        ctx.fillStyle = "#888";
+        for (const x of ticks) ctx.fillText(this.noise ? this.xLabel(x).replace(/0+$/, "").replace(/\.$/, "") : x, this.toScreen([x, 0], a)[0], a.y1 + 4);
 
         // Curves, the active one last and with its points.
         const curves = this.load();
@@ -422,7 +425,7 @@ class CurveEditor {
         if (this.hover) {
             ctx.textAlign = "right";
             ctx.fillStyle = "#aaa";
-            ctx.fillText(`step ${this.hover[0]}  ×${this.hover[1].toFixed(2)}`, a.x1, 13);
+            ctx.fillText(`${this.noise ? "noise" : "step"} ${this.xLabel(this.hover[0])}  ×${this.hover[1].toFixed(2)}`, a.x1, 13);
         }
     }
 }
@@ -457,6 +460,7 @@ app.registerExtension({
             onWidgetChange(this, "steps", (before) => editor.rescaleSteps(before));
             onWidgetChange(this, "max_strength", () => editor.draw());
             onWidgetChange(this, "mode", () => editor.draw());
+            onWidgetChange(this, "axis", () => editor.draw());
             editor.sync();
             if (this.size[0] < 380) this.setSize([380, this.size[1]]);
         };

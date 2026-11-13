@@ -91,8 +91,8 @@ class CurveTests(unittest.TestCase):
     def slider(self, tag, strength, mode):
         return sliders.AnimaTagSlider.execute(self.model, self.clip, "", tag, {"mode": mode, "start_percent": 0.0, "end_percent": 1.0, "rescale": 0.0, "anchor": False}, strength, False)[0]
 
-    def curves(self, curves, mode, steps=3):
-        return sliders.AnimaTagCurves.execute(self.model, self.clip, "\n".join(curves), steps, 4.0, json.dumps(curves), {"mode": mode, "rescale": 0.0}, False)[0]
+    def curves(self, curves, mode, steps=3, axis="steps"):
+        return sliders.AnimaTagCurves.execute(self.model, self.clip, "\n".join(curves), steps, 4.0, json.dumps(curves), {"mode": mode, "rescale": 0.0}, False, axis)[0]
 
     def test_flat_curve_is_the_slider(self):
         for mode in ("weight", "weight_norm", "attention", "guidance"):
@@ -109,6 +109,15 @@ class CurveTests(unittest.TestCase):
                 torch.testing.assert_close(out[1], self.predictions(self.slider("fisheye lens", 2.25, mode))[1], rtol=0, atol=1e-4)
                 torch.testing.assert_close(out[2], self.predictions(self.slider("fisheye lens", 1.5, mode))[2], rtol=0, atol=1e-4)
 
+    def test_noise_axis_reads_the_curve_at_the_noise_level(self):
+        # SIGMAS 1, 0.8, 0.5 sit at 0, 0.4 and 1 on a 3-point noise axis, so [[0, 3], [2, 1]] gives 3, 2.6 and 2.
+        curve = {"fisheye lens": [[0, 3.0], [2, 1.0]]}
+        for mode in ("weight_norm", "attention", "guidance"):
+            with self.subTest(mode=mode):
+                out = self.predictions(self.curves(curve, mode, axis="noise"))
+                for step, strength in enumerate((3.0, 2.6, 2.0)):
+                    torch.testing.assert_close(out[step], self.predictions(self.slider("fisheye lens", strength, mode))[step], rtol=0, atol=1e-4)
+
     def test_curve_at_one_is_the_tag_as_written(self):
         written = self.predictions(self.slider("fisheye lens", 1.0, "weight"))
         for mode in ("weight", "weight_norm", "attention", "guidance"):
@@ -122,7 +131,7 @@ class CurveTests(unittest.TestCase):
         self.assertGreater((mixed[0] - swapped[0]).abs().max().item(), 1e-3)
         # Two chained curve nodes number their tags apart.
         chained = sliders.AnimaTagCurves.execute(self.curves({"fisheye lens": [[0, 2.0]]}, "attention"), self.clip, "from above", 3, 4.0, json.dumps({"from above": [[0, 1.0]]}),
-                                                 {"mode": "attention"}, False)[0]
+                                                 {"mode": "attention"}, False, "steps")[0]
         for a, b in zip(self.predictions(chained), mixed):
             torch.testing.assert_close(a, b, rtol=0, atol=1e-4)
 

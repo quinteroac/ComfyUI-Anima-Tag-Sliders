@@ -54,6 +54,7 @@ You can find the nodes under `Anima/conditioning`. Chain several nodes like LoRA
 - Right-click the curve area for a menu of shapes for the selected tag's curve: flat at 1, ramp up or down, ease in or out, S-curve up or down, cosine fade, bell, valley, early only (first third) or late only (last two thirds). The shape spans 0 to `max_strength` over the steps, and you can edit its points afterwards. On a point, the menu also has Delete point.
 - Between points the strength is linear, past the first and last point it stays flat. A new tag starts flat at 1.
 - Changing `steps` keeps the points at the same place on the curve. A sampler with a different step count is stretched onto the curve.
+- `axis` sets what x is. `steps` (default) is the sampler step. `noise` is the noise level, from full noise (σ 1, left) to none (σ 0, right), with `steps` as the number of points across it. The step axis depends on the schedule: Sigmas Equalize or a custom schedule moves the same steps to other noise levels, so a tag that is on for the first steps can act before the image has a layout. On the noise axis a curve does the same at any schedule or step count.
 - Modes are the same as the sliders. Guidance only has `rescale`, since the curve replaces `start_percent`, `end_percent` and `anchor`; a curve at 0 early on is the anchor.
 - The tags go in as written; each step scales them in cross-attention. weight and weight_norm scale only the values there, which in Anima matches scaling the token weights. At strength 0 the tag's values are zero, like padding, not removed.
 
@@ -97,7 +98,7 @@ From the ComfyUI root:
 python custom_nodes/ComfyUI-Anima-Tag-Sliders/tests/test_curves.py
 ```
 
-It samples a tiny random Anima on CPU and checks that a flat curve equals the slider node at the same strength in every mode, and that each step uses its own value of the curve.
+It samples a tiny random Anima on CPU and checks that a flat curve equals the slider node at the same strength in every mode, that each step uses its own value of the curve, and that the noise axis reads the curve at the noise level of each step.
 
 ## Benchmark
 

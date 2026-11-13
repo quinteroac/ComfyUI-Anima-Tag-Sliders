@@ -128,9 +128,9 @@ def range_schedule(tags, sigma_start, sigma_end, anchor):
     return schedule
 
 
-def curve_schedule(tags, steps):
+def curve_schedule(tags, position):
     def schedule(sigma, sample_sigmas):
-        x = curve_step(sigma, sample_sigmas, steps)
+        x = position(sigma, sample_sigmas)
         return [(key, curve_value(points, x)) for key, points in tags]
     return schedule
 
@@ -235,6 +235,13 @@ def curve_step(sigma, sample_sigmas, steps):
     return i * (steps - 1) / max(len(sample) - 1, 1)
 
 
+def curve_position(axis, steps, sigma_max):
+    """x on a curve axis of `steps` points for the current sigma: the sampler step, or the noise level from sigma_max (x = 0) down to 0 (x = steps - 1)."""
+    if axis == "noise":
+        return lambda sigma, sample_sigmas: min(max(1.0 - sigma / sigma_max, 0.0), 1.0) * (steps - 1)
+    return lambda sigma, sample_sigmas: curve_step(sigma, sample_sigmas, steps)
+
+
 def curve_attention(previous, weight, norm, bias):
     """Per-token value scales and logit bias of the curve tags at this step. norm scales the values like weight,
     then keeps each cross-attention output at the magnitude it has with those tags as written."""
@@ -264,8 +271,8 @@ def curve_attention_wrapper(executor, *args, **kwargs):
         sigma = options["sigmas"].max().item()
         # Row 0 is every token that is not a curve tag.
         tables = {mode: [1.0] for mode in ("weight", "weight_norm", "attention")}
-        for points, steps, mode in curves:
-            s = max(curve_value(points, curve_step(sigma, options["sample_sigmas"], steps)), 0.0)
+        for points, position, mode in curves:
+            s = max(curve_value(points, position(sigma, options["sample_sigmas"])), 0.0)
             for m, table in tables.items():
                 table.append(s if m == mode else 1.0)
         index = numbers.long()
@@ -400,12 +407,12 @@ class AnimaTagCurves(io.ComfyNode):
             node_id="AnimaTagCurves",
             display_name="Anima Tag Curves",
             category="Anima/conditioning",
-            description="Up to 4 tags, one per line, each with its own strength curve over the sampling steps. Draw the curves in the editor: x is the step, y the strength (1 = the tag as written).",
+            description="Up to 4 tags, one per line, each with its own strength curve over the sampling steps. Draw the curves in the editor: x is the step or the noise level (axis), y the strength (1 = the tag as written).",
             inputs=[
                 io.Model.Input("model"),
                 io.Clip.Input("clip"),
                 io.String.Input("tags", multiline=True, default="from above\nfisheye"),
-                io.Int.Input("steps", default=20, min=1, max=10000, tooltip="Steps on the curve axis. A sampler with another step count is stretched onto the curve."),
+                io.Int.Input("steps", default=20, min=1, max=10000, tooltip="Points on the curve axis. With axis steps they are the sampler steps, and a sampler with another step count is stretched onto the curve; with axis noise they set how finely the noise axis is divided."),
                 io.Float.Input("max_strength", default=1.5, min=0.05, max=sys.float_info.max, step=0.05, tooltip="Top of the strength axis; in guidance the axis also goes down to -max_strength."),
                 io.String.Input("curves", default="{}"),
                 io.DynamicCombo.Input("mode", tooltip=MODE_TOOLTIP, options=[
@@ -417,16 +424,18 @@ class AnimaTagCurves(io.ComfyNode):
                     ]),
                 ]),
                 io.Boolean.Input("bypass", default=False, tooltip="Returns the model unchanged, to compare against the image without the tags."),
+                io.Combo.Input("axis", options=["steps", "noise"], default="steps", tooltip="What x is: the sampler step, or the noise level from full noise (left) to none (right), so a curve does the same at any schedule or step count."),
             ],
             outputs=[io.Model.Output()],
         )
 
     @classmethod
-    def execute(cls, model, clip, tags, steps, max_strength, curves, mode, bypass):
+    def execute(cls, model, clip, tags, steps, max_strength, curves, mode, bypass, axis):
         curves = parse_curves(tags, json.loads(curves or "{}"), steps, max_strength, mode["mode"])
         if bypass or not curves:
             return io.NodeOutput(model)
         patched = model.clone()
+        position = curve_position(axis, steps, float(patched.get_model_object("model_sampling").sigma_max))
         if mode["mode"] == "guidance":
             guided = []
             for tag, points in curves:
@@ -436,14 +445,14 @@ class AnimaTagCurves(io.ComfyNode):
                 guided.append((key, points))
             patched.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, BASE_KEY, pop_base_wrapper)
             previous = patched.model_options.get("sampler_calc_cond_batch_function")
-            patched.model_options["sampler_calc_cond_batch_function"] = tag_guidance(previous, curve_schedule(guided, steps), mode["rescale"])
+            patched.model_options["sampler_calc_cond_batch_function"] = tag_guidance(previous, curve_schedule(guided, position), mode["rescale"])
             return io.NodeOutput(patched)
         # The tags go in as written; each step scales them in cross-attention, where weight and weight_norm act on the values only.
         options = patched.model_options.setdefault("transformer_options", {})
         registered = list(options.get(CURVES_OPTION, []))
         for tag, points in curves:
             cond, ids, weights = encode_tag(clip, tag)
-            registered.append((points, steps, mode["mode"]))
+            registered.append((points, position, mode["mode"]))
             number = float(len(registered))
             patched.add_object_patch("extra_conds", extra_conds_with_tag(patched.get_model_object("extra_conds"), cond, ids, weights, [(CURVE_KEY, 0.0, lambda a, n=number: a.fill_(n))], None))
         options[CURVES_OPTION] = registered
