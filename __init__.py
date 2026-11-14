@@ -1,5 +1,7 @@
 import json
 import math
+import os
+import random
 import sys
 
 import torch
@@ -460,9 +462,77 @@ class AnimaTagCurves(io.ComfyNode):
         return io.NodeOutput(patched)
 
 
+with open(os.path.join(os.path.dirname(__file__), "styles.json"), encoding="utf-8") as f:
+    STYLES = json.load(f)
+# Danbooru artist tags Anima knows, most trained first.
+with open(os.path.join(os.path.dirname(__file__), "artists.txt"), encoding="utf-8") as f:
+    ARTISTS = [{"id": line.strip(), "label": line.strip(), "category": "artist", "text": line.strip()} for line in f if line.strip()]
+
+
+def parse_style_codes(code, mix):
+    """code 123 and mix '456::0.5, 789' -> [(123, 1.0), (456, 0.5), (789, 1.0)], like --sref 123 456::0.5 789."""
+    codes = [(code, 1.0)]
+    for part in mix.replace(",", " ").split():
+        number, _, weight = part.partition("::")
+        if not number.isdigit():
+            raise ValueError("Anima Style Code: mix takes style codes with an optional ::weight, like 456::0.5, got '%s'." % part)
+        codes.append((int(number), float(weight) if weight else 1.0))
+    return codes
+
+
+def code_styles(code, count, artists, pool):
+    """The styles and artists a code stands for and their weights, which average 1 (a flat Dirichlet). Artists come from the pool most trained."""
+    rng = random.Random(code)
+    picked = rng.sample(STYLES, min(count, len(STYLES))) + rng.sample(ARTISTS[:pool], min(artists, pool, len(ARTISTS)))
+    count = len(picked)
+    if not picked:
+        return []
+    draws = [rng.expovariate(1.0) for _ in picked]
+    return [(style, count * d / sum(draws)) for style, d in zip(picked, draws)]
+
+
+def mix_styles(codes, count, artists, pool):
+    weights = {}
+    for code, code_weight in codes:
+        for style, w in code_styles(code, count, artists, pool):
+            weights[style["id"]] = (style, weights.get(style["id"], (style, 0.0))[1] + w * code_weight)
+    return [entry for entry in weights.values() if entry[1] > 0]
+
+
+class AnimaStyleCode(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="AnimaStyleCode",
+            display_name="Anima Style Code",
+            category="Anima/conditioning",
+            description="A style from a number, like Midjourney's --sref codes: each code picks a few styles and artist tags from the pack's lists with random weights and adds them to the positive prompt. Randomize the code to look for styles and keep the codes you like.",
+            inputs=[
+                io.Model.Input("model"),
+                io.Clip.Input("clip"),
+                io.Int.Input("code", default=0, min=0, max=0xffffffffffffffff, control_after_generate=True, tooltip="The style code. The same code gives the same styles and weights on any prompt."),
+                io.String.Input("mix", default="", tooltip="More codes to blend in, each with an optional ::weight (code is weight 1), like 456::0.5, 789."),
+                io.Int.Input("styles_per_code", default=2, min=0, max=8, tooltip="How many styles each code mixes."),
+                io.Int.Input("artists_per_code", default=1, min=0, max=8, tooltip="How many artist tags each code mixes in with the styles."),
+                io.Int.Input("artist_pool", default=5000, min=1, max=len(ARTISTS), tooltip="Artists are drawn from this many of the most trained ones; the rarest have little effect."),
+                io.Float.Input("strength", default=1.5, min=0.0, max=4.0, step=0.05, display_mode=io.NumberDisplay.slider, tooltip="How much the image attends to the styles, like --sw; 1 is as written. 0 is the model unchanged."),
+                io.Boolean.Input("bypass", default=False, tooltip="Returns the model unchanged, to compare against the image without the style."),
+            ],
+            outputs=[io.Model.Output(), io.String.Output(display_name="styles", tooltip="The styles the codes picked, with their weights.")],
+            is_experimental=True,
+        )
+
+    @classmethod
+    def execute(cls, model, clip, code, mix, styles_per_code, artists_per_code, artist_pool, strength, bypass):
+        styles = mix_styles(parse_style_codes(code, mix), styles_per_code, artists_per_code, artist_pool)
+        listing = "\n".join("%s (%s) %.2f" % (style["label"], style["category"], w) for style, w in styles)
+        if bypass or strength == 0 or not styles:
+            return io.NodeOutput(model, listing)
+        return io.NodeOutput(apply_tags(model, clip, [(style["text"], w * strength) for style, w in styles], {"mode": "attention"}), listing)
+
 class AnimaTagSlidersExtension(ComfyExtension):
     async def get_node_list(self):
-        return [AnimaTagSlider, AnimaTagSliders, AnimaTagCurves]
+        return [AnimaTagSlider, AnimaTagSliders, AnimaTagCurves, AnimaStyleCode]
 
 
 async def comfy_entrypoint():

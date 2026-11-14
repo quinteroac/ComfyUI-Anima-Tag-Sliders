@@ -62,6 +62,8 @@ You can find the nodes under `Anima/conditioning`. Chain several nodes like LoRA
 
 All nodes have a `bypass` switch that returns the model unchanged, so you can compare against the image without the tags.
 
+**Anima Style Code**: a style from a number, like Midjourney's `--sref` codes. Each `code` picks `styles_per_code` styles (default 2) from `styles.json` with random weights that average 1, and adds their tags to the positive prompt in attention mode, so the same code gives the same mix on any prompt. Set the code to randomize to look for styles and keep the ones you like; the `styles` output lists what a code picked (connect Preview as Text). `mix` blends more codes, like `456::0.5, 789`. `strength` works like `--sw` (default 1.5). `styles.json` holds 645 styles with their tag lists from [comfyui-stylebook](https://github.com/EnragedAntelope/comfyui-stylebook) (MIT, see `STYLES_LICENSE`). Edit it to remove or add styles. Each code also mixes in `artists_per_code` artist tags (default 1) drawn from the `artist_pool` most trained artists (default 5000) in `artists.txt`, the 59,676 Danbooru artist tags Anima 2B knows, most trained first, from the [ThetaCursed Anima 2B artist index](https://github.com/ThetaCursed/Anima-Style-Explorer) (MIT). Set `styles_per_code` to 0 for artists only. `example_workflows/anima_style_code.json` is the curves workflow with this node in place of the curves.
+
 ## Modes
 
 | Mode | What it does |
